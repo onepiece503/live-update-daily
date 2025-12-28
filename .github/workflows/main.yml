@@ -1,0 +1,157 @@
+name: Update TV Source File
+
+on:
+  schedule:
+    - cron: '0 22 * * *'  # UTC 22:00 = 北京时间 06:00
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update-file:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Setup Git
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        
+    - name: Prepare directory
+      run: |
+        mkdir -p tv
+        echo "创建 tv 目录..."
+        
+    - name: Test URL with verbose output
+      run: |
+        echo "=== 测试URL访问 ==="
+        REMOTE_URL="https://my9.ltd/tv/pllive.txt"
+        
+        echo "1. 使用curl测试HTTP头:"
+        curl -I -L \
+          -H "User-Agent: Mozilla/5.0" \
+          --max-time 30 \
+          "$REMOTE_URL" 2>&1 | head -20 || echo "curl失败"
+          
+        echo ""
+        echo "2. 下载前10K测试内容:"
+        curl -s -L \
+          -H "User-Agent: curl/8.8.0" \
+          --max-time 30 \
+          --range 0-10240 \
+          "$REMOTE_URL" | head -c 500 && echo "..."
+          
+    - name: Download TV source file
+      id: download
+      run: |
+        echo "开始下载直播源文件..."
+        
+        REMOTE_URL="https://my9.ltd/tv/pllive.txt"
+        LOCAL_PATH="tv/pllive.txt"
+        TEMP_FILE="pllive_temp.txt"
+        
+        echo "目标URL: $REMOTE_URL"
+        echo "保存路径: $LOCAL_PATH"
+        
+        # 清空临时文件
+        rm -f "$TEMP_FILE" "$LOCAL_PATH"
+        
+        # 方法1: 使用与本地测试完全相同的参数
+        echo ""
+        echo "=== 方法1: 完全模仿本地测试 ==="
+        curl -v -L \
+          -o "$TEMP_FILE" \
+          -H "User-Agent: curl/8.8.0" \
+          -H "Accept: */*" \
+          --max-time 60 \
+          "$REMOTE_URL" 2>&1 | grep -E "HTTP/|Content-Type|Content-Length|Server" | head -10 || true
+        
+        if [ -f "$TEMP_FILE" ]; then
+          FILE_SIZE=$(wc -c < "$TEMP_FILE" 2>/dev/null || echo 0)
+          echo "下载文件大小: $FILE_SIZE 字节"
+          
+          if [ $FILE_SIZE -gt 1000 ]; then
+            echo "文件大小看起来正常"
+            
+            # 显示文件开头内容
+            echo "文件开头50个字符:"
+            head -c 50 "$TEMP_FILE" && echo ""
+            
+            # 放宽内容验证条件
+            if head -c 100 "$TEMP_FILE" | grep -q -E "MoMo更新|#genre#|#EXTM3U|上海电信|http://|https://|rtp://"; then
+              echo "✅ 内容验证通过 - 包含直播源特征"
+              mv "$TEMP_FILE" "$LOCAL_PATH"
+              echo "downloaded=true" >> $GITHUB_OUTPUT
+              echo "method=curl_exact" >> $GITHUB_OUTPUT
+            else
+              echo "⚠️ 内容验证失败，显示详细内容:"
+              echo "================================="
+              head -c 200 "$TEMP_FILE"
+              echo ""
+              echo "================================="
+              
+              # 如果是小文件，显示全部内容
+              if [ $FILE_SIZE -lt 5000 ]; then
+                echo "完整文件内容:"
+                cat "$TEMP_FILE"
+              fi
+              
+              # 但依然保存文件用于调试
+              mv "$TEMP_FILE" "$LOCAL_PATH"
+              echo "⚠️ 内容验证失败但保存文件用于调试"
+              echo "downloaded=true" >> $GITHUB_OUTPUT
+              echo "method=curl_exact_with_warning" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "❌ 文件太小，可能下载失败"
+            rm -f "$TEMP_FILE"
+          fi
+        else
+          echo "❌ 文件下载失败"
+        fi
+        
+        # 方法2: 尝试不同的User-Agent
+        if [ ! -f "$LOCAL_PATH" ] || [ ! -s "$LOCAL_PATH" ]; then
+          echo ""
+          echo "=== 方法2: 尝试浏览器User-Agent ==="
+          
+          USER_AGENTS=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0"
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+          )
+          
+          for UA in "${USER_AGENTS[@]}"; do
+            echo ""
+            echo "尝试 User-Agent: $(echo $UA | cut -c1-50)..."
+            
+            curl -s -L \
+              -o "$TEMP_FILE" \
+              -H "User-Agent: $UA" \
+              -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" \
+              -H "Accept-Language: zh-CN,zh;q=0.9" \
+              -H "Referer: https://my9.ltd/" \
+              --max-time 45 \
+              "$REMOTE_URL"
+              
+            if [ -f "$TEMP_FILE" ] && [ -s "$TEMP_FILE" ]; then
+              FILE_SIZE=$(wc -c < "$TEMP_FILE")
+              echo "下载大小: $FILE_SIZE 字节"
+              
+              if [ $FILE_SIZE -gt 50000 ]; then  # 期望的文件很大
+                echo "✅ 可能下载成功，文件大小合理"
+                mv "$TEMP_FILE" "$LOCAL_PATH"
+                echo "downloaded=true" >> $GITHUB_OUTPUT
+                echo "method=ua_$(echo $UA | cut -d' ' -f1 | tr -d '()')" >> $GITHUB_OUTPUT
+                break
+              fi
+            fi
+            sleep 1
+          done
+        fi
+        
+ 
